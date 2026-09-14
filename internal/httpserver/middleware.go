@@ -28,6 +28,13 @@ func applyMiddleware(handler http.Handler, middlewareChain ...middleware) http.H
 	}
 	return handler
 }
+func contentTypeOptions(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		responseWriter.Header().Set("X-Content-Type-Options", "nosniff")
+
+		next.ServeHTTP(responseWriter, request)
+	})
+}
 
 func permissiveCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
