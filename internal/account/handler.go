@@ -14,6 +14,7 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
+	"github.com/bootdotdev/learn-web-security/internal/auth/passwords"
 )
 
 type pageView struct {
@@ -77,11 +78,24 @@ func (handler *Handler) UpdateEmail(responseWriter http.ResponseWriter, request 
 	if !ok || !handler.verifyCSRF(responseWriter, request, current.Session.CSRFToken) {
 		return
 	}
+
+	currentPassword, err := httpx.FormValue(request, "currentPassword")
+	if err != nil {
+		handler.errorPage(responseWriter, http.StatusBadRequest, "Invalid Request", "The submitted form is invalid.")
+		return
+	}
+
+	if currentPassword == "" || !passwords.Verify(currentPassword, current.User.PasswordHash) {
+		handler.errorPage(responseWriter, http.StatusForbidden, "Forbidden", "Please reauthenticate to continue.")
+		return
+	}
+
 	email, emailErr := httpx.FormValue(request, "email")
 	if emailErr != nil {
 		handler.errorPage(responseWriter, http.StatusBadRequest, "Invalid Request", "The submitted form is invalid.")
 		return
 	}
+
 	email = accounts.NormalizeEmail(email)
 	if email == "" {
 		if err := handler.renderPage(responseWriter, http.StatusBadRequest, current, "Email is required."); err != nil {
@@ -89,17 +103,20 @@ func (handler *Handler) UpdateEmail(responseWriter http.ResponseWriter, request 
 		}
 		return
 	}
+
 	existingUser, found, err := handler.accountStore.FindUserByEmail(request.Context(), email)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	if found && existingUser.ID != current.User.ID {
 		if err := handler.renderPage(responseWriter, http.StatusConflict, current, "Email is already in use."); err != nil {
 			handler.internalError(responseWriter, request, err)
 		}
 		return
 	}
+
 	if err := handler.accountStore.UpdateEmail(request.Context(), current.User.ID, email); errors.Is(err, accounts.ErrEmailExists) {
 		if renderErr := handler.renderPage(responseWriter, http.StatusConflict, current, "Email is already in use."); renderErr != nil {
 			handler.internalError(responseWriter, request, renderErr)
@@ -109,8 +126,11 @@ func (handler *Handler) UpdateEmail(responseWriter http.ResponseWriter, request 
 		handler.internalError(responseWriter, request, err)
 		return
 	}
+
 	http.Redirect(responseWriter, request, "/account", http.StatusFound)
 }
+
+
 
 func (handler *Handler) TOTPPage(responseWriter http.ResponseWriter, request *http.Request) {
 	current, ok := handler.requireRecentAuth(responseWriter, request)
