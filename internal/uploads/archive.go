@@ -66,11 +66,41 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 	identifier := uuid.NewV4()
 	importDirectory := filepath.Join(extractionDirectory, identifier.String())
 	plannedEntries := make([]plannedArchiveEntry, 0, len(archiveReader.File))
+	
 	for _, entry := range archiveReader.File {
 		entryDestination := filepath.Join(importDirectory, entry.Name)
 		if isIgnoredArchiveEntry(entry.Name) {
 			continue
 		}
+
+		if filepath.IsAbs(entry.Name) {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains an absolute path.",
+				StatusCode: 400,
+			}
+		}
+
+		if strings.Contains(entry.Name, `\`) {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains an invalid path.",
+				StatusCode: 400,
+			}
+		}
+
+		if entry.Mode()&os.ModeSymlink != 0 {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains a symbolic link.",
+				StatusCode: 400,
+			}
+		}
+		entryDestination = filepath.Join(importDirectory, entry.Name)
+		if !isInsideDirectory(importDirectory, entryDestination) {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains a path outside the import directory.",
+				StatusCode: 400,
+			}
+		}
+
 		if strings.HasSuffix(entry.Name, "/") {
 			plannedEntries = append(plannedEntries, plannedArchiveEntry{directory: true, destination: entryDestination})
 			continue
@@ -186,4 +216,21 @@ func discardArchiveAfterWriteFailure(archive ExtractedTaxDocumentArchive, err er
 		return ExtractedTaxDocumentArchive{}, errors.Join(err, discardErr)
 	}
 	return ExtractedTaxDocumentArchive{}, err
+}
+
+func isInsideDirectory(trustedDirectory, candidate string) bool {
+	relativePath, err := filepath.Rel(trustedDirectory, candidate)
+	if err != nil {
+		return false
+	}
+	if relativePath == "." || relativePath == ".." {
+		return false
+	}
+	if strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		return false
+	}
+	if filepath.IsAbs(relativePath) {
+		return false
+	}
+	return true
 }
