@@ -11,7 +11,6 @@ import (
 
 var (
 	orderNumberPattern = regexp.MustCompile(`(?i)order\s*#?(\d+)`)
-	userNumberPattern  = regexp.MustCompile(`(?i)user\s*#?(\d+)`)
 	refundPattern      = regexp.MustCompile(`(?i)refund`)
 )
 
@@ -55,7 +54,7 @@ func (service *Service) BuildRequest(authenticatedUserID int64, userMessage stri
 				Content: userMessage,
 			},
 		},
-		Tools: service.createTools(),
+		Tools: service.createTools(authenticatedUserID),
 	}
 }
 
@@ -72,53 +71,48 @@ func RunSimulatedAssistant(ctx context.Context, request Request) (string, error)
 	if userMessage == "" {
 		return "Ask me about an order using its order number.", nil
 	}
+
+	if refundPattern.MatchString(userMessage) {
+		return "I cannot issue refunds. Please contact support.", nil
+	}
+
 	orderID, found := requestedOrderID(userMessage)
 	if !found {
 		return "Ask me about an order using its order number.", nil
 	}
 
-	userID, _ := requestedUserID(userMessage)
-
 	for _, tool := range request.Tools {
-		toolRequested := tool.Name == "get_order_status" && !refundPattern.MatchString(userMessage) ||
-			tool.Name == "issue_refund" && refundPattern.MatchString(userMessage)
-
-		if toolRequested && tool.Execute != nil {
+		if tool.Name == "get_order_status" && tool.Execute != nil {
 			return tool.Execute(ctx, map[string]any{
 				"orderId": orderID,
-				"userId":  userID,
 			})
 		}
 	}
+
 	return "Order status is unavailable.", nil
 }
 
-func (service *Service) createTools() []Tool {
+func (service *Service) createTools(authenticatedUserID int64) []Tool {
 	return []Tool{
 		{
 			Name:        "get_order_status",
 			Description: "Look up an order status using an order ID.",
 			Execute: func(ctx context.Context, input map[string]any) (string, error) {
 				orderID, valid := input["orderId"].(int64)
-				userID, validUser := input["userId"].(int64)
-				if !valid || !validUser || orderID <= 0 || userID <= 0 {
+				if !valid || orderID <= 0 || authenticatedUserID <= 0 {
 					return "Order not found.", nil
 				}
+
 				order, found, err := service.orderStore.FindByID(ctx, orderID)
 				if err != nil {
 					return "", err
 				}
-				if !found || order.UserID != userID {
+
+				if !found || order.UserID != authenticatedUserID {
 					return "Order not found.", nil
 				}
+
 				return "Order #" + strconv.FormatInt(order.ID, 10) + " is " + order.Status + ".", nil
-			},
-		},
-		{
-			Name:        "issue_refund",
-			Description: "Issue a refund for an order.",
-			Execute: func(context.Context, map[string]any) (string, error) {
-				return "Refund issued.", nil
 			},
 		},
 	}
@@ -129,18 +123,11 @@ func requestedOrderID(message string) (int64, bool) {
 	if len(match) != 2 {
 		return 0, false
 	}
+
 	orderID, valid := httpx.ParseSafeInteger(match[1])
 	if !valid || orderID <= 0 {
 		return 0, false
 	}
-	return orderID, true
-}
 
-func requestedUserID(message string) (int64, bool) {
-	match := userNumberPattern.FindStringSubmatch(message)
-	if len(match) != 2 {
-		return 1, true
-	}
-	userID, valid := httpx.ParseSafeInteger(match[1])
-	return userID, valid && userID > 0
+	return orderID, true
 }

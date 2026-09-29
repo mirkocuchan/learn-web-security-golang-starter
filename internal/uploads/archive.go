@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"mime"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,13 +51,22 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 	if err != nil {
 		return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: "Choose a valid ZIP archive.", StatusCode: 400}
 	}
+
 	if len(archiveReader.File) > maxArchiveEntries {
-		return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: fmt.Sprintf("Archive contains more than %d entries.", maxArchiveEntries), StatusCode: 413}
+		return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+			Message:    fmt.Sprintf("Archive contains more than %d entries.", maxArchiveEntries),
+			StatusCode: 413,
+		}
 	}
+
 	var uncompressedBytes uint64
 	for _, entry := range archiveReader.File {
-		if entry.UncompressedSize64 > uint64(maxArchiveUncompressedBytes) || uncompressedBytes > uint64(maxArchiveUncompressedBytes)-entry.UncompressedSize64 {
-			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: "Archive expands beyond 20 MiB.", StatusCode: 413}
+		if entry.UncompressedSize64 > uint64(maxArchiveUncompressedBytes) ||
+			uncompressedBytes > uint64(maxArchiveUncompressedBytes)-entry.UncompressedSize64 {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive expands beyond 20 MiB.",
+				StatusCode: 413,
+			}
 		}
 		uncompressedBytes += entry.UncompressedSize64
 	}
@@ -66,9 +74,8 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 	identifier := uuid.NewV4()
 	importDirectory := filepath.Join(extractionDirectory, identifier.String())
 	plannedEntries := make([]plannedArchiveEntry, 0, len(archiveReader.File))
-	
+
 	for _, entry := range archiveReader.File {
-		entryDestination := filepath.Join(importDirectory, entry.Name)
 		if isIgnoredArchiveEntry(entry.Name) {
 			continue
 		}
@@ -93,7 +100,9 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 				StatusCode: 400,
 			}
 		}
-		entryDestination = filepath.Join(importDirectory, entry.Name)
+
+		entryDestination := filepath.Join(importDirectory, entry.Name)
+
 		if !isInsideDirectory(importDirectory, entryDestination) {
 			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
 				Message:    "Archive contains a path outside the import directory.",
@@ -102,32 +111,60 @@ func ExtractTaxDocumentArchive(encryptionKeyring Keyring, contents []byte, extra
 		}
 
 		if strings.HasSuffix(entry.Name, "/") {
-			plannedEntries = append(plannedEntries, plannedArchiveEntry{directory: true, destination: entryDestination})
+			plannedEntries = append(plannedEntries, plannedArchiveEntry{
+				directory:   true,
+				destination: entryDestination,
+			})
 			continue
 		}
+
 		entryContents, err := readArchiveEntry(entry)
 		if err != nil {
-			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{Message: "Choose a valid ZIP archive.", StatusCode: 400}
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Choose a valid ZIP archive.",
+				StatusCode: 400,
+			}
 		}
-		contentType := mime.TypeByExtension(filepath.Ext(entry.Name))
-		if contentType == "" {
-			contentType = "application/octet-stream"
+
+		contentType, extension, accepted := detectDocumentType(entryContents)
+		if !accepted {
+			return ExtractedTaxDocumentArchive{}, &ArchiveImportError{
+				Message:    "Archive contains an unsupported document type.",
+				StatusCode: 400,
+			}
 		}
+
 		storedContents, encrypted, err := encryptDocument(entryContents, encryptionKeyring)
 		if err != nil {
 			return ExtractedTaxDocumentArchive{}, err
 		}
-		storagePath := entryDestination
+
+		storagePath := filepath.Join(
+			filepath.Dir(entryDestination),
+			filepath.Base(entryDestination)+extension,
+		)
+
 		if encrypted {
 			storagePath += ".enc"
 		}
+
 		plannedEntries = append(plannedEntries, plannedArchiveEntry{
-			destination: storagePath, contents: storedContents, encrypted: encrypted,
-			document: ExtractedTaxDocument{OriginalName: entry.Name, StoragePath: storagePath, ContentType: contentType},
+			destination: storagePath,
+			contents:    storedContents,
+			encrypted:   encrypted,
+			document: ExtractedTaxDocument{
+				OriginalName: entry.Name,
+				StoragePath: storagePath,
+				ContentType: contentType,
+			},
 		})
 	}
 
-	archive := ExtractedTaxDocumentArchive{ImportDirectory: importDirectory, extractionDirectory: extractionDirectory}
+	archive := ExtractedTaxDocumentArchive{
+		ImportDirectory:     importDirectory,
+		extractionDirectory: extractionDirectory,
+	}
+
 	for _, entry := range plannedEntries {
 		if !entry.directory {
 			archive.Documents = append(archive.Documents, entry.document)
