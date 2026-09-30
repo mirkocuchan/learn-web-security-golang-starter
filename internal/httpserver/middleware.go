@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"net"
+	"net/url"
 	"net/http"
 	"slices"
 	"strconv"
@@ -95,6 +96,55 @@ func LoadShedder(_ int, _ int) func(http.Handler) http.Handler {
 func SearchThrottle(_ *templates.Renderer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return next
+	}
+}
+
+func requireTrustedOrigin(appOrigin string, renderer *templates.Renderer) middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			if request.Method != http.MethodPost {
+				next.ServeHTTP(responseWriter, request)
+				return
+			}
+			origin := request.Header.Get("Origin")
+			if origin == "" {
+				referer := request.Header.Get("Referer")
+				if referer == "" {
+					httpx.RespondWithErrorPage(
+						responseWriter,
+						renderer,
+						http.StatusForbidden,
+						"Forbidden",
+						"Request source is not trusted.",
+					)
+					return
+				}
+				parsedReferer, err := url.Parse(referer)
+				if err != nil || parsedReferer.Scheme == "" || parsedReferer.Host == "" {
+					httpx.RespondWithErrorPage(
+						responseWriter,
+						renderer,
+						http.StatusForbidden,
+						"Forbidden",
+						"Request source is not trusted.",
+					)
+					return
+				}
+
+				origin = parsedReferer.Scheme + "://" + parsedReferer.Host
+			}
+			if origin != appOrigin {
+				httpx.RespondWithErrorPage(
+					responseWriter,
+					renderer,
+					http.StatusForbidden,
+					"Forbidden",
+					"Request source is not trusted.",
+				)
+				return
+			}
+			next.ServeHTTP(responseWriter, request)
+		})
 	}
 }
 
