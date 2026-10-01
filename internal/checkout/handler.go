@@ -82,6 +82,13 @@ func (handler *Handler) Submit(responseWriter http.ResponseWriter, request *http
 	if !ok {
 		return
 	}
+
+	csrfToken, err := httpx.FormValue(request, "csrfToken")
+	if err != nil || !sessions.CSRFTokensMatch(current.Session.CSRFToken, csrfToken) {
+		http.Error(responseWriter, http.StatusText(http.StatusForbidden), http.StatusForbidden)
+		return
+	}
+	
 	items, err := handler.cartStore.ListItems(request.Context(), current.User.ID)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
