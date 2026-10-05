@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"github.com/joho/godotenv"
 	"time"
 )
 
@@ -27,6 +28,7 @@ const (
 
 type Config struct {
 	PawPalAPIKey               string
+	DownloadSigningKey         [32]byte
 	AppOrigin                  string
 	Port                       int
 	DatabasePath               string
@@ -43,14 +45,62 @@ type AttackerLabConfig struct {
 }
 
 func Load(workingDirectory string) (Config, error) {
-	return Parse(processEnvironment(), workingDirectory)
+	environment := loadEnvironment(workingDirectory)
+	return Parse(environment, workingDirectory)
 }
 
 func LoadAttackerLab(workingDirectory string) (AttackerLabConfig, error) {
-	return ParseAttackerLab(processEnvironment())
+	environment := loadEnvironment(workingDirectory)
+	return ParseAttackerLab(environment)
+}
+
+func loadEnvironment(workingDirectory string) map[string]string {
+	environment := make(map[string]string)
+
+	envPath := filepath.Join(workingDirectory, ".env")
+	if _, err := os.Stat(envPath); err == nil {
+		values, err := godotenv.Read(envPath)
+		if err == nil {
+			for name, value := range values {
+				environment[name] = value
+			}
+		}
+	}
+
+	for _, entry := range os.Environ() {
+		name, value, found := strings.Cut(entry, "=")
+		if found {
+			environment[name] = value
+		}
+	}
+
+	return environment
+}
+
+func parseSigningKey(value string) ([32]byte, error) {
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != 32 {
+		return [32]byte{}, errors.New("DOWNLOAD_SIGNING_KEY must be exactly 64 hexadecimal characters")
+	}
+	return [32]byte(decoded), nil
 }
 
 func Parse(environment map[string]string, workingDirectory string) (Config, error) {
+	pawPalAPIKey, err := requiredValue(environment, "PAWPAL_API_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+	
+	downloadSigningKeyValue, err := requiredValue(environment, "DOWNLOAD_SIGNING_KEY")
+	if err != nil {
+		return Config{}, err
+	}
+
+	downloadSigningKey, err := parseSigningKey(downloadSigningKeyValue)
+	if err != nil {
+		return Config{}, err
+	}
+
 	port, err := parseNonNegativeInteger(valueOrDefault(environment, "PORT", strconv.Itoa(defaultPort)), "PORT")
 	if err != nil {
 		return Config{}, err
@@ -79,7 +129,8 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 	}
 
 	return Config{
-		PawPalAPIKey:               "bs_test_pawpal_starter_key",
+		PawPalAPIKey:               pawPalAPIKey,
+		DownloadSigningKey:         downloadSigningKey,
 		AppOrigin:                  appOrigin,
 		Port:                       port,
 		DatabasePath:               databasePath,
@@ -219,4 +270,12 @@ func normalizeEncryptionVersion(version string) (string, error) {
 		}
 	}
 	return normalized, nil
+}
+
+func requiredValue(environment map[string]string, name string) (string, error) {
+	value := environment[name]
+	if value == "" {
+		return "", fmt.Errorf("missing required environment variable: %s", name)
+	}
+	return value, nil
 }
