@@ -14,6 +14,7 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
+	"github.com/bootdotdev/learn-web-security/internal/auth/returnto"
 )
 
 const (
@@ -295,10 +296,7 @@ func (handler *authHandler) logAuthenticationEvent(_ *http.Request, eventName st
 }
 
 func safeReturnTo(value string) string {
-	if value == "" {
-		return "/"
-	}
-	return value
+	return returnto.Safe(value)
 }
 
 func nullableUserID(user accounts.User, found bool) any {
