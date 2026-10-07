@@ -31,6 +31,7 @@ type Config struct {
 	DownloadSigningKey         [32]byte
 	AppOrigin                  string
 	Port                       int
+	TrustedProxyHops           int
 	DatabasePath               string
 	AcornFulfillmentDelay      time.Duration
 	MaxRequestBodyBytes        int64
@@ -118,7 +119,7 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 		return Config{}, err
 	}
 
-	activeEncryptionKeyVersion, encryptionKeys, err := parseOptionalEncryptionKeys(environment)
+	activeEncryptionKeyVersion, encryptionKeys, err := parseEncryptionKeys(environment)
 	if err != nil {
 		return Config{}, err
 	}
@@ -127,12 +128,16 @@ func Parse(environment map[string]string, workingDirectory string) (Config, erro
 	if databasePath == "" {
 		databasePath = filepath.Join(workingDirectory, "data", defaultDatabaseFilename)
 	}
-
+	trustedProxyHops, err := parseNonNegativeInteger(valueOrDefault(environment, "TRUST_PROXY_HOPS", "0"), "TRUST_PROXY_HOPS")
+	if err != nil {
+		return Config{}, err
+	}
 	return Config{
 		PawPalAPIKey:               pawPalAPIKey,
 		DownloadSigningKey:         downloadSigningKey,
 		AppOrigin:                  appOrigin,
 		Port:                       port,
+		TrustedProxyHops:           trustedProxyHops,
 		DatabasePath:               databasePath,
 		AcornFulfillmentDelay:      acornFulfillmentDelay,
 		MaxRequestBodyBytes:        MaxRequestBodyBytes,

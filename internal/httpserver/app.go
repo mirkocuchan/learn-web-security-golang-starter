@@ -40,6 +40,7 @@ const (
 type Options struct {
 	AppOrigin               string
 	DownloadSigningKey 		[32]byte
+	TrustedProxyHops        int
 	MaxPublicProductResults int
 	MaxRequestBodyBytes     int64
 	MaxUploadBytes          int64

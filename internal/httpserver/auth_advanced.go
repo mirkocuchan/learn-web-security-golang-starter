@@ -225,6 +225,19 @@ func (handler *authHandler) RecoverMFA(responseWriter http.ResponseWriter, reque
 		}
 		return
 	}
+	if passwords.NeedsRehash(user.PasswordHash) {
+		passwordHash, err := passwords.Hash(password)
+		if err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
+
+		if err := handler.accounts.UpdatePasswordHash(request.Context(), user.ID, passwordHash); err != nil {
+			handler.internalError(responseWriter, request, err)
+			return
+		}
+	}
+
 	consumed, err := handler.mfa.ConsumeBackupCode(request.Context(), user.ID, backupCode)
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
