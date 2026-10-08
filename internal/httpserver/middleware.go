@@ -97,15 +97,37 @@ func recoverPanics(logger *logging.Logger, renderer *templates.Renderer) middlew
 	}
 }
 
-func LoadShedder(_ int, _ int) func(http.Handler) http.Handler {
-	return func(next http.Handler) http.Handler {
-		return next
+func LoadShedder(maxInFlight int, retryAfterSeconds int) func(http.Handler) http.Handler {
+	if maxInFlight <= 0 {
+		panic("load shedder: max in-flight must be positive")
 	}
-}
+	if retryAfterSeconds <= 0 {
+		panic("load shedder: retry delay must be positive")
+	}
 
-func SearchThrottle(_ *templates.Renderer) func(http.Handler) http.Handler {
+	inFlight := make(chan struct{}, maxInFlight)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			responseWriter.Header().Set("X-In-Flight-Limit", strconv.Itoa(maxInFlight))
+
+			select {
+			case inFlight <- struct{}{}:
+				defer func() {
+					<-inFlight
+				}()
+
+				next.ServeHTTP(responseWriter, request)
+
+			default:
+				responseWriter.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds))
+				httpx.RespondWithJSON(
+					responseWriter,
+					http.StatusServiceUnavailable,
+					map[string]string{"error": "Service is at capacity"},
+				)
+			}
+		})
 	}
 }
 
@@ -264,9 +286,20 @@ func (limiter *fixedWindowLimiter) reject(responseWriter http.ResponseWriter, re
 }
 
 func fixedWindowRateLimiter(options rateLimitOptions) middleware {
-	validateRateLimitOptions(options)
+	limiter := newFixedWindowLimiter(options)
+
 	return func(next http.Handler) http.Handler {
-		return next
+		return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+			state, limited := limiter.consume(request)
+
+			if limited {
+				limiter.reject(responseWriter, request, state)
+				return
+			}
+
+			setRateLimitHeaders(responseWriter, state)
+			next.ServeHTTP(responseWriter, request)
+		})
 	}
 }
 
@@ -274,6 +307,26 @@ func setRateLimitHeaders(responseWriter http.ResponseWriter, state rateLimitStat
 	responseWriter.Header().Set("RateLimit-Limit", strconv.Itoa(state.limit))
 	responseWriter.Header().Set("RateLimit-Remaining", strconv.Itoa(state.remaining))
 	responseWriter.Header().Set("RateLimit-Reset", strconv.FormatInt(state.resetAt.Unix()+boolToInt64(state.resetAt.Nanosecond() > 0), 10))
+}
+func SearchThrottle(renderer *templates.Renderer) middleware {
+	return fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Second,
+		maximum: 5,
+		key: func(_ *http.Request) string {
+			return "search"
+		},
+		onLimit: func(responseWriter http.ResponseWriter, _ *http.Request, _ rateLimitState) {
+			if err := httpx.RespondWithErrorPage(
+				responseWriter,
+				renderer,
+				http.StatusTooManyRequests,
+				"Search Is Busy",
+				"Try again shortly.",
+			); err != nil {
+				http.Error(responseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+		},
+	})
 }
 
 func clientIPKey(request *http.Request) string {

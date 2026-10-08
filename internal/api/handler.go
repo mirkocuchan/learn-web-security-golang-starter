@@ -168,13 +168,21 @@ func (handler *Handler) WarehouseOrders(responseWriter http.ResponseWriter, requ
 		})
 		return
 	}
-
+	quota, err := handler.apiStore.ConsumeQuota(request.Context(), key.ID)
+	if err != nil {
+		handler.internalError(responseWriter, request, err)
+		return
+	}
+	SetQuotaHeaders(responseWriter, quota)
+	if !quota.Allowed {
+		RespondWithQuotaExhausted(responseWriter, quota)
+		return
+	}
 	orders, err := handler.orderStore.ListAll(request.Context())
 	if err != nil {
 		handler.internalError(responseWriter, request, err)
 		return
 	}
-
 	responses := make([]integrationOrderResponse, 0, len(orders))
 	for _, order := range orders {
 		responses = append(responses, integrationOrderResponse{
@@ -184,10 +192,10 @@ func (handler *Handler) WarehouseOrders(responseWriter http.ResponseWriter, requ
 			CreatedAt:  order.CreatedAt,
 		})
 	}
-
 	httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{
 		"integration": "Warehouse Fulfillment Integration",
 		"orders":      responses,
+		"quota":       ToQuotaResponse(quota),
 	})
 }
 

@@ -39,7 +39,7 @@ const (
 
 type Options struct {
 	AppOrigin               string
-	DownloadSigningKey 		[32]byte
+	DownloadSigningKey      [32]byte
 	TrustedProxyHops        int
 	MaxPublicProductResults int
 	MaxRequestBodyBytes     int64
@@ -51,6 +51,14 @@ type Options struct {
 	FixtureDirectory        string
 	TemplateDirectory       string
 	PublicDirectory         string
+}
+
+func normalizedEmailKey(request *http.Request) string {
+	email, err := httpx.FormValue(request, "email")
+	if err != nil {
+		return "invalid"
+	}
+	return accounts.NormalizeEmail(email)
 }
 
 type Application struct {
@@ -99,7 +107,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		accountStore,
 		renderer,
 		logger,
-		unboundedPublicProductResults,
+		options.MaxPublicProductResults,
 	)
 	uploadHandler := uploads.NewHandler(
 		accountStore,
@@ -108,11 +116,18 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		logger,
 		options.EncryptionKeyring,
 		uploadDirectory,
-		defaultUploadBytes,
+		options.MaxUploadBytes,
 		options.DownloadSigningKey,
 	)
 	adminHandler := admin.NewHandler(admin.NewStore(database), accountStore, renderer, logger, imagepreview.NewService(), options.MaxUploadBytes)
-	apiHandler := api.NewHandler(accountStore, orderStore, productStore, api.NewStore(database), logger, unboundedPublicProductResults)
+	apiHandler := api.NewHandler(
+		accountStore,
+		orderStore,
+		productStore,
+		api.NewStore(database),
+		logger,
+		options.MaxPublicProductResults,
+	)
 	assistantHandler := assistant.NewHandler(accountStore, assistant.NewService(orderStore), renderer, logger)
 	supportHandler := support.NewHandler(
 		accountStore,
@@ -122,7 +137,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		logger,
 		options.EncryptionKeyring,
 		filepath.Join(options.DataDirectory, "bulk-tax-documents"),
-		defaultUploadBytes,
+		options.MaxUploadBytes,
 	)
 	authenticationHandler := newAuthHandler(accountStore, mfaStore, passwordResetStore, renderer, logger, options.AppOrigin)
 	passkeyHandler, err := passkeys.NewHandler(
@@ -137,27 +152,74 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 	if err != nil {
 		return nil, err
 	}
+	apiProductsRateLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Minute,
+		maximum: 30,
+		key:     clientIPKeyWithTrustedProxies(options.TrustedProxyHops),
+		onLimit: func(responseWriter http.ResponseWriter, _ *http.Request, _ rateLimitState) {
+			httpx.RespondWithJSON(
+				responseWriter,
+				http.StatusTooManyRequests,
+				map[string]string{"error": "Too many requests"},
+			)
+		},
+	})
+
+	apiProductsHandler := http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		responseWriter.Header().Set("Access-Control-Allow-Origin", "*")
+		apiProductsRateLimiter(http.HandlerFunc(apiHandler.Products)).ServeHTTP(responseWriter, request)
+	})
+
+	loginSourceLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  15 * time.Minute,
+		maximum: 20,
+		key:     clientIPKeyWithTrustedProxies(options.TrustedProxyHops),
+	})
+
+	loginAccountLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  15 * time.Minute,
+		maximum: 5,
+		key:     normalizedEmailKey,
+	})
+
+	totpSourceLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  15 * time.Minute,
+		maximum: 20,
+		key:     clientIPKeyWithTrustedProxies(options.TrustedProxyHops),
+	})
+
+	resetSourceLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Hour,
+		maximum: 10,
+		key:     clientIPKeyWithTrustedProxies(options.TrustedProxyHops),
+	})
+
+	resetAccountLimiter := fixedWindowRateLimiter(rateLimitOptions{
+		window:  time.Hour,
+		maximum: 3,
+		key:     normalizedEmailKey,
+	})
 	dynamicMux := http.NewServeMux()
 	dynamicMux.HandleFunc("GET /{$}", storefrontHandler.Storefront)
-	dynamicMux.HandleFunc("GET /search", storefrontHandler.Search)
+	dynamicMux.Handle("GET /search",SearchThrottle(renderer)(http.HandlerFunc(storefrontHandler.Search)),)
 	dynamicMux.HandleFunc("GET /products/{id}", storefrontHandler.Product)
 	dynamicMux.HandleFunc("GET /api/account/orders", apiHandler.AccountOrders)
 	dynamicMux.HandleFunc("GET /api/orders/{id}", apiHandler.Order)
-	dynamicMux.HandleFunc("GET /api/products", apiHandler.Products)
+	dynamicMux.Handle("GET /api/products", apiProductsHandler)
 	dynamicMux.HandleFunc("OPTIONS /api/products", apiHandler.ProductsOptions)
 	dynamicMux.HandleFunc("GET /api/integrations/warehouse/orders", apiHandler.WarehouseOrders)
 	dynamicMux.Handle("POST /products/{id}/reviews", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(reviewHandler.Create)))
 	dynamicMux.HandleFunc("GET /login", authenticationHandler.LoginPage)
-	dynamicMux.Handle("POST /login", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.Login)))
+	dynamicMux.Handle("POST /login",parseForm(options.MaxRequestBodyBytes, renderer)(loginSourceLimiter(loginAccountLimiter(http.HandlerFunc(authenticationHandler.Login),),),),)
 	dynamicMux.HandleFunc("GET /login/totp", authenticationHandler.TOTPLoginPage)
-	dynamicMux.Handle("POST /login/totp", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.TOTPLogin)))
+	dynamicMux.Handle("POST /login/totp",totpSourceLimiter(parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.TOTPLogin),),),)
 	dynamicMux.HandleFunc("POST /login/totp/cancel", authenticationHandler.CancelTOTPLogin)
 	dynamicMux.HandleFunc("GET /signup", authenticationHandler.SignupPage)
 	dynamicMux.Handle("POST /signup", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.Signup)))
 	dynamicMux.HandleFunc("GET /recover-mfa", authenticationHandler.MFARecoveryPage)
 	dynamicMux.Handle("POST /recover-mfa", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.RecoverMFA)))
 	dynamicMux.HandleFunc("GET /password-reset", authenticationHandler.PasswordResetRequestPage)
-	dynamicMux.Handle("POST /password-reset", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.RequestPasswordReset)))
+	dynamicMux.Handle("POST /password-reset",parseForm(options.MaxRequestBodyBytes, renderer)(resetSourceLimiter(resetAccountLimiter(http.HandlerFunc(authenticationHandler.RequestPasswordReset),),),),)
 	dynamicMux.HandleFunc("GET /password-reset/{token}", authenticationHandler.PasswordResetPage)
 	dynamicMux.Handle("POST /password-reset/{token}", parseForm(options.MaxRequestBodyBytes, renderer)(http.HandlerFunc(authenticationHandler.ResetPassword)))
 	dynamicMux.HandleFunc("POST /logout", authenticationHandler.Logout)
@@ -212,13 +274,19 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 			http.Error(responseWriter, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		}
 	})
-
-	dynamicHandler := requireTrustedOrigin(options.AppOrigin, renderer)(dynamicMux)
+	dynamicHandler := LoadShedder(50, 1)(
+		fixedWindowRateLimiter(rateLimitOptions{
+			window:  time.Minute,
+			maximum: 100,
+			key:     clientIPKeyWithTrustedProxies(options.TrustedProxyHops),
+		})(requireTrustedOrigin(options.AppOrigin, renderer)(dynamicMux)),
+	)
 
 	mainMux := http.NewServeMux()
 	mainMux.HandleFunc("GET /health", func(responseWriter http.ResponseWriter, _ *http.Request) {
 		httpx.RespondWithJSON(responseWriter, http.StatusOK, map[string]any{"ok": true, "app": "bearly-secure"})
 	})
+
 	staticHandler := newStaticHandler(publicRoot)
 	mainMux.Handle("GET /reset.css", staticHandler)
 	mainMux.Handle("GET /styles.css", staticHandler)
