@@ -139,7 +139,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		filepath.Join(options.DataDirectory, "bulk-tax-documents"),
 		options.MaxUploadBytes,
 	)
-	authenticationHandler := newAuthHandler(accountStore, mfaStore, passwordResetStore, renderer, logger, options.AppOrigin)
+	authenticationHandler := newAuthHandler(accountStore, mfaStore, passwordResetStore, renderer, logger, options.AppOrigin, options.TrustedProxyHops)
 	passkeyHandler, err := passkeys.NewHandler(
 		options.AppOrigin,
 		accountStore,
@@ -200,6 +200,17 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 		key:     normalizedEmailKey,
 	})
 	dynamicMux := http.NewServeMux()
+	dynamicMux.HandleFunc("GET /.well-known/security.txt", func(w http.ResponseWriter, r *http.Request) {
+		expires := time.Now().UTC().AddDate(0, 0, 180).Format(time.RFC3339)
+
+		w.Header().Set("Content-Type", "text/plain")
+		fmt.Fprintf(w,
+			"Contact: mailto:security@bearlysecure.example\n"+
+				"Policy: https://bearlysecure.example/security-policy\n"+
+				"Expires: %s\n",
+			expires,
+		)
+	})
 	dynamicMux.HandleFunc("GET /{$}", storefrontHandler.Storefront)
 	dynamicMux.Handle("GET /search",SearchThrottle(renderer)(http.HandlerFunc(storefrontHandler.Search)),)
 	dynamicMux.HandleFunc("GET /products/{id}", storefrontHandler.Product)
@@ -301,6 +312,7 @@ func New(database *sql.DB, logger *logging.Logger, options Options) (*Applicatio
 
 	handler := applyMiddleware(
 		mainMux,
+		requestID,
 		cspNonce,
 		securityHeaders,
 		recoverPanics(logger, renderer),

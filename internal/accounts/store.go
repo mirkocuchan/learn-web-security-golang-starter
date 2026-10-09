@@ -211,6 +211,14 @@ func (store *Store) CurrentSession(ctx context.Context, token string) (CurrentSe
 	}, true, nil
 }
 
+func (store *Store) RevokeAllActiveSessions(ctx context.Context) (int, error) {
+	count, err := store.queries.RevokeAllActiveSessions(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("revoke all active sessions: %w", err)
+	}
+	return int(count), nil
+}
+
 func (store *Store) RevokeSession(ctx context.Context, token string) error {
 	revokedAt := formatTimestamp(store.now().UTC())
 	if err := store.queries.RevokeSession(ctx, dbgen.RevokeSessionParams{

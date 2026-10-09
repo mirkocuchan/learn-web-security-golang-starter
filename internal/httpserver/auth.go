@@ -5,6 +5,8 @@ import (
 	"net/http"
 	"strings"
 	"unicode/utf8"
+	"github.com/gofrs/uuid/v5"
+	"time"
 
 	"github.com/bootdotdev/learn-web-security/internal/accounts"
 	"github.com/bootdotdev/learn-web-security/internal/auth/mfa"
@@ -16,6 +18,7 @@ import (
 	"github.com/bootdotdev/learn-web-security/internal/templates"
 	"github.com/bootdotdev/learn-web-security/internal/auth/returnto"
 	"github.com/bootdotdev/learn-web-security/internal/botdetection"
+	"github.com/bootdotdev/learn-web-security/internal/observability"
 )
 
 const (
@@ -34,17 +37,33 @@ type authHandler struct {
 	logger         *logging.Logger
 	mfa            *mfa.Store
 	passwordResets *passwordreset.Store
+	trustedProxyHops int
 	appOrigin      string
+	failedLoginAlerts   *observability.AuthAlertThreshold
+	passwordResetAlerts *observability.AuthAlertThreshold
 }
 
-func newAuthHandler(accountStore *accounts.Store, mfaStore *mfa.Store, passwordResetStore *passwordreset.Store, renderer *templates.Renderer, logger *logging.Logger, appOrigin string) *authHandler {
+func newAuthHandler(accountStore *accounts.Store, mfaStore *mfa.Store, passwordResetStore *passwordreset.Store, renderer *templates.Renderer, logger *logging.Logger, appOrigin string, trustedProxyHops int) *authHandler {
 	return &authHandler{
 		accounts:       accountStore,
 		renderer:       renderer,
 		logger:         logger,
 		mfa:            mfaStore,
 		passwordResets: passwordResetStore,
+		trustedProxyHops: trustedProxyHops,
 		appOrigin:      appOrigin,
+		failedLoginAlerts: observability.NewAuthAlertThreshold(
+			"failed_logins",
+			3,
+			5*time.Minute,
+			logger,
+		),
+		passwordResetAlerts: observability.NewAuthAlertThreshold(
+			"password_reset_requests",
+			3,
+			10*time.Minute,
+			logger,
+		),
 	}
 }
 
@@ -310,8 +329,43 @@ func (handler *authHandler) internalError(responseWriter http.ResponseWriter, re
 	}
 }
 
-func (handler *authHandler) logAuthenticationEvent(_ *http.Request, eventName string, fields map[string]any) {
-	_ = handler.logger.Event(eventName, fields)
+func (handler *authHandler) logAuthenticationEvent(
+	request *http.Request,
+	eventName string,
+	fields map[string]any,
+) {
+	eventFields := make(map[string]any, len(fields)+4)
+
+	for key, value := range fields {
+		eventFields[key] = value
+	}
+
+	requestID, _ := request.Context().Value(requestIDContextKey{}).(uuid.UUID)
+	sourceIP := clientIPKeyWithTrustedProxies(handler.trustedProxyHops)(request)
+
+	userID, exists := fields["userId"]
+	if !exists {
+		userID = nil
+	}
+	success, _ := fields["success"].(bool)
+	eventFields["requestId"] = requestID.String()
+	eventFields["sourceIp"] = sourceIP
+	eventFields["userId"] = userID
+	switch eventName {
+	case "login_attempt", "totp_login_attempt":
+		if !success {
+			handler.failedLoginAlerts.Record(requestID, sourceIP, userID)
+		}
+	case "password_reset_request":
+		handler.passwordResetAlerts.Record(requestID, sourceIP, userID)
+	}
+	outcome := "failure"
+	if success, ok := fields["success"].(bool); ok && success {
+		outcome = "success"
+	}
+	eventFields["outcome"] = outcome
+
+	_ = handler.logger.Event(eventName, eventFields)
 }
 
 func safeReturnTo(value string) string {

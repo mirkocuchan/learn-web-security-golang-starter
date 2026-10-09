@@ -15,7 +15,8 @@ import (
 	"strings"
 	"sync"
 	"time"
-
+	"context"
+	"github.com/gofrs/uuid/v5"
 	"github.com/bootdotdev/learn-web-security/internal/httpx"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 	"github.com/bootdotdev/learn-web-security/internal/templates"
@@ -56,7 +57,29 @@ func securityHeaders(next http.Handler) http.Handler {
 		next.ServeHTTP(responseWriter, request)
 	})
 }
+type requestIDContextKey struct{}
 
+func requestID(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
+		id, err := uuid.NewV4()
+		if err != nil {
+			http.Error(
+				responseWriter,
+				http.StatusText(http.StatusInternalServerError),
+				http.StatusInternalServerError,
+			)
+			return
+		}
+
+		responseWriter.Header().Set("X-Request-ID", id.String())
+
+		request = request.WithContext(
+			context.WithValue(request.Context(), requestIDContextKey{}, id),
+		)
+
+		next.ServeHTTP(responseWriter, request)
+	})
+}
 func cspNonce(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(responseWriter http.ResponseWriter, request *http.Request) {
 		nonceBytes := make([]byte, 16)

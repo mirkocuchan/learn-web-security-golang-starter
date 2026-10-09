@@ -3,8 +3,7 @@ package observability
 import (
 	"sync"
 	"time"
-	"uuid"
-
+	"github.com/gofrs/uuid/v5"
 	"github.com/bootdotdev/learn-web-security/internal/logging"
 )
 
